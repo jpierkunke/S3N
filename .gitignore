@@ -21,3 +21,4 @@ states.zip
 *.pdf
 compare_STARS*
 region5_allcovariates_diagnostics_files/*
+test_files/*
