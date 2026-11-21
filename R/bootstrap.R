@@ -107,44 +107,47 @@ BRISC_bootstrap <- function(BRISC_Out, n_boot = 100, h = 1, n_omp = 1,
   # parallelization with h cores and n.omp.threads threads
   if(h > 1){
     cl <- makeCluster(h)
-    clusterExport(cl=cl, 
-                  varlist=c("norm.residual", 
-                            "X", "B", "efF", 
-                            "Xbeta", "D", "d", 
-                            "nnIndx", "nnIndxLU",
-                            "CIndx", "nnWt", "Dwt",
-                            "n", "p", 
-                            "n.neighbors", "theta_boot_init", 
-                            "cov.model.indx", "Length.D",
-                            "n.omp.threads", "bootstrap_brisc", 
-                            "eps", "fix_nugget"),
-                  envir=environment())
-    if(verbose == TRUE){
-      cat(paste(("----------------------------------------"), collapse="   "), "\n"); cat(paste(("\tBootstrap Progress"), collapse="   "), "\n"); cat(paste(("----------------------------------------"), collapse="   "), "\n")
-      pboptions(type = "txt", char = "=")
-      result <- pblapply(
-        1:n_boot,
-        bootstrap_brisc,
-        norm.residual, 
-        X, B, efF, Xbeta, D, d, 
-        nnIndx, nnIndxLU, CIndx, nnWt, Dwt,
-        n, p, n.neighbors, 
-        theta_boot_init, cov.model.indx, 
-        Length.D, n.omp.threads, eps, fix_nugget,
-        cl = cl)
-      } else { # not verbose
-      result <- parLapply(
-        cl,
-        1:n_boot,
-        bootstrap_brisc,
-        norm.residual, 
-        X, B, efF, Xbeta, D, d,
-        nnIndx, nnIndxLU, CIndx, nnWt, Dwt,
-        n, p, n.neighbors, 
-        theta_boot_init, cov.model.indx, 
-        Length.D, n.omp.threads, eps, fix_nugget)
-      }
-    stopCluster(cl)
+    tryCatch({
+      clusterCall(cl, .libPaths, .libPaths())
+      clusterEvalQ(cl, loadNamespace("S3N"))
+      clusterExport(cl=cl, 
+                    varlist=c("norm.residual", 
+                              "X", "B", "efF", 
+                              "Xbeta", "D", "d", 
+                              "nnIndx", "nnIndxLU",
+                              "CIndx", "nnWt", "Dwt",
+                              "n", "p", 
+                              "n.neighbors", "theta_boot_init", 
+                              "cov.model.indx", "Length.D",
+                              "n.omp.threads", "bootstrap_brisc", 
+                              "eps", "fix_nugget"),
+                    envir=environment())
+      if(verbose == TRUE){
+        cat(paste(("----------------------------------------"), collapse="   "), "\n"); cat(paste(("\tBootstrap Progress"), collapse="   "), "\n"); cat(paste(("----------------------------------------"), collapse="   "), "\n")
+        pboptions(type = "txt", char = "=")
+        result <- pblapply(
+          1:n_boot,
+          bootstrap_brisc,
+          norm.residual, 
+          X, B, efF, Xbeta, D, d, 
+          nnIndx, nnIndxLU, CIndx, nnWt, Dwt,
+          n, p, n.neighbors, 
+          theta_boot_init, cov.model.indx, 
+          Length.D, n.omp.threads, eps, fix_nugget,
+          cl = cl)
+        } else { # not verbose
+        result <- parLapply(
+          cl,
+          1:n_boot,
+          bootstrap_brisc,
+          norm.residual, 
+          X, B, efF, Xbeta, D, d,
+          nnIndx, nnIndxLU, CIndx, nnWt, Dwt,
+          n, p, n.neighbors, 
+          theta_boot_init, cov.model.indx, 
+          Length.D, n.omp.threads, eps, fix_nugget)
+        }
+    }, finally = stopCluster(cl))
   }
   if(h == 1){ # no parallelization (1 core)
     if(verbose == TRUE){

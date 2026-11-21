@@ -261,9 +261,10 @@ SEXP BRISC_predictioncpp_s(SEXP X_r, SEXP y_r, SEXP coords_r, SEXP n_r, SEXP p_r
   
   // Rprintf("nnDist[3113, 3113]: %f \n", nnDist[3113, 3113]);
 
-#ifdef _OPENMP
-  omp_set_num_threads(nThreads);
-#else
+  if(nThreads < 1){
+    nThreads = 1;
+  }
+#ifndef _OPENMP
   if(nThreads > 1){
     warning("n.omp.threads > %i, but source not compiled with OpenMP support.", nThreads);
     nThreads = 1;
@@ -307,8 +308,8 @@ SEXP BRISC_predictioncpp_s(SEXP X_r, SEXP y_r, SEXP coords_r, SEXP n_r, SEXP p_r
   // return(0);
 
   if(corName == "matern"){
-    if(theta[nuIndx] > nb){
-      nb = theta[nuIndx];
+    if(theta[nuIndx] > nuMax){
+      nuMax = theta[nuIndx];
     }
 
     nb = 1+static_cast<int>(floor(nuMax));
@@ -321,7 +322,7 @@ SEXP BRISC_predictioncpp_s(SEXP X_r, SEXP y_r, SEXP coords_r, SEXP n_r, SEXP p_r
   double *tmp_m  = (double *) R_alloc(nThreads*m, sizeof(double));
   double phi = 0, nu = 0, sigmaSq = 0, tauSq = 0, d;
   int threadID = 0;
-  int k_ind, k_and_l;
+  int err_flag = 0;
 
   SEXP y0_r;
   SEXP vary0_r;
@@ -350,15 +351,12 @@ SEXP BRISC_predictioncpp_s(SEXP X_r, SEXP y_r, SEXP coords_r, SEXP n_r, SEXP p_r
 
 
 #ifdef _OPENMP
-#pragma omp parallel for private(threadID, phi, nu, sigmaSq, tauSq, k, l, d, info)
+#pragma omp parallel for num_threads(nThreads) private(threadID, phi, nu, sigmaSq, tauSq, k, l, d, info)
 #endif
 
   // for each prediction point i from 0 to q-1
   for(i = 0; i < q; i++){ //3; i++){ //q; i++){
     // Rprintf("\n\n-------------------------------------------------\n");
-    if(verbose){
-      Rprintf("i: %i \n", i);
-    }
     // Rprintf("-------------------------------------------------\n");
     
 #ifdef _OPENMP
@@ -380,7 +378,7 @@ SEXP BRISC_predictioncpp_s(SEXP X_r, SEXP y_r, SEXP coords_r, SEXP n_r, SEXP p_r
       //   Rprintf("\n i: %i, i+q*k: %i, nnIndx0[i+q*k] %i \n", i, i+q*k, nnIndx0[i+q*k]);
       // }
       // k_ind = i+q*k; //this was when I had a matrix format
-      k_ind = m*i + k;
+      int k_ind = m*i + k;
       // Rprintf("d(i, k): %f \n", d);
       // afv[nnIndx0[i+q*l]-1]
       // Rprintf("i %i, k %i, k_ind %i, nnWght0[%i] %f, nnDist0[%i] %f\n", i, k, k_ind, k_ind, nnWght0[k_ind], k_ind, nnDist0[k_ind]);
@@ -400,7 +398,7 @@ SEXP BRISC_predictioncpp_s(SEXP X_r, SEXP y_r, SEXP coords_r, SEXP n_r, SEXP p_r
         // k_and_l = n*(nnIndx0[k_ind]-1) + (nnIndx0[m*i+l]-1);
         
         // Rprintf("\n nnIndx0: %i, %i", nnIndx0[i+q*k], nnIndx0[i+q*l]);
-        k_and_l = n*(nnIndx0[k_ind]) + (nnIndx0[m*i+l]);
+        int k_and_l = n*(nnIndx0[k_ind]) + (nnIndx0[m*i+l]);
         
         // if(i < 2 && l < 5 && k < 5){
         //   Rprintf("%f ", d);
@@ -455,10 +453,27 @@ SEXP BRISC_predictioncpp_s(SEXP X_r, SEXP y_r, SEXP coords_r, SEXP n_r, SEXP p_r
     // Cholesky factor of C to find the inverse
     F77_NAME(dpotrf)(lower, &m, &C[threadID*mm], &m, &info FCONE);
     // Rprintf("\n %d", info);
-    if(info != 0){error("c++ error: dpotrf failed\n");}
+    if(info != 0){
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+      {
+        if(err_flag == 0){ err_flag = 1; }
+      }
+      continue;
+    }
 
     // This line replaces C with inverse of C
-    F77_NAME(dpotri)(lower, &m, &C[threadID*mm], &m, &info FCONE); if(info != 0){error("c++ error: dpotri failed\n");}
+    F77_NAME(dpotri)(lower, &m, &C[threadID*mm], &m, &info FCONE);
+    if(info != 0){
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+      {
+        if(err_flag == 0){ err_flag = 2; }
+      }
+      continue;
+    }
 
     // if(i == 7064){
     //   Rprintf("C inverse:\n");
@@ -487,7 +502,7 @@ SEXP BRISC_predictioncpp_s(SEXP X_r, SEXP y_r, SEXP coords_r, SEXP n_r, SEXP p_r
     // where f = y - X*beta (observed)
     d = 0;
     for(k = 0; k < m; k++){
-      k_ind = m*i + k;
+      int k_ind = m*i + k;
       d += tmp_m[threadID*m+k]*(y[nnIndx0[k_ind]] - F77_NAME(ddot)(&p, &X[nnIndx0[k_ind]], &n, &beta[0], &inc));
       // if(i == 7064){
       //   Rprintf("d=%f\n", d);
@@ -532,6 +547,9 @@ SEXP BRISC_predictioncpp_s(SEXP X_r, SEXP y_r, SEXP coords_r, SEXP n_r, SEXP p_r
   // tauSq is included here because BRISC models the response, not the latent process, as an NNGP
   vary0[i] = std::max(0.0, sqrt(sigmaSq + tauSq - F77_NAME(ddot)(&m, &tmp_m[threadID*m], &inc, &c[threadID*m], &inc)));
   }
+
+  if(err_flag == 1){error("c++ error: dpotrf failed\n");}
+  if(err_flag == 2){error("c++ error: dpotri failed\n");}
 
   //make return object
   SEXP result_r, resultName_r;
