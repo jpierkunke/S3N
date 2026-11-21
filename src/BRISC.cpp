@@ -47,6 +47,29 @@ extern "C" {
     double eps_nngp;
     double fix_nugget_nngp;
 
+#ifdef _OPENMP
+    static int prevThreads_nngp = -1;
+
+    static void set_omp_threads_saved(int nThreads){
+        prevThreads_nngp = omp_get_max_threads();
+        omp_set_num_threads(nThreads);
+    }
+
+    static void restore_omp_threads(){
+        if(prevThreads_nngp > 0){
+            omp_set_num_threads(prevThreads_nngp);
+            prevThreads_nngp = -1;
+        }
+    }
+#else
+    static void restore_omp_threads(){}
+#endif
+
+    static void brisc_error(const char *msg){
+        restore_omp_threads();
+        error("%s", msg);
+    }
+
 
     //covmodel = 0; exponential
     //covmodel = 1; spherical
@@ -70,11 +93,13 @@ extern "C" {
         char lower = 'L';
         double logDet = 0;
         double nu = 0;
-        int k_ind = 0;
-        int l_and_k = 0;
+        int err_flag = 0;
         //check if the model is 'matern'
         if (covModel == 2) {
             nu = theta[2];
+        }
+        if(nThreads < 1){
+            nThreads = 1;
         }
         // Rprintf("nThreads: %i", nThreads);
 
@@ -93,7 +118,7 @@ extern "C" {
         // Rprintf("i before loop: %i", i);
 
 #ifdef _OPENMP
-#pragma omp parallel for private(k, l, info, threadID)
+#pragma omp parallel for num_threads(nThreads) private(k, l, info, threadID)
 #endif
       
         for(i = 0; i < n; i++){
@@ -113,7 +138,7 @@ extern "C" {
                     //       c_3 = (C_03, C_23) if 0 and 2 are the nearest neighbors of 3
                     // c = c_1, c_2, c_3 concatenated into a single vector
                     // use the spatial weights nnWt between i and the kth neighbor of i (nnIndxLU[i]+k)
-                    k_ind = nnIndxLU[i]+k;
+                    int k_ind = nnIndxLU[i]+k;
                     c[k_ind] = nnWt[k_ind]*spCor(d[k_ind], theta[1], nu, covModel, &bk[threadID*nb]);
                     // if(c[k_ind] != c[k_ind]){
                       // Rprintf("\ti = %i, k = %i, c[%i] = %f\n", i, k, k_ind, c[k_ind]);
@@ -128,7 +153,7 @@ extern "C" {
                         //      C_3 = (C_00, C_20, 0, C_22) if 0 and 2 are the nearest neighbors of 3
                         // C = C_1, C_2, C_3 concatenated into a single vector
                         // use the spatial weights Dwt for the lth and kth neighbors of point i
-                        l_and_k = CIndx[i]+l*nnIndxLU[n+i]+k;
+                        int l_and_k = CIndx[i]+l*nnIndxLU[n+i]+k;
                         C[l_and_k] = Dwt[l_and_k]*spCor(D[l_and_k], theta[1], nu, covModel, &bk[threadID*nb]);
                         if(l == k){
                             // For diagonal entries, add the nugget (iid) variance
@@ -143,11 +168,29 @@ extern "C" {
                 
                 // Rprintf("\tbefore dpotrf\n");
                 // replace C with its Cholesky factor
-                F77_NAME(dpotrf)(&lower, &nnIndxLU[n+i], &C[CIndx[i]], &nnIndxLU[n+i], &info FCONE); if(info != 0){error("c++ error: updateBF dpotrf failed\n");} //if(info == 0){Rprintf("dpotrf was fine\n");}
+                F77_NAME(dpotrf)(&lower, &nnIndxLU[n+i], &C[CIndx[i]], &nnIndxLU[n+i], &info FCONE);
+                if(info != 0){
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+                    {
+                        if(err_flag == 0){ err_flag = 1; }
+                    }
+                    continue;
+                }
                 
                 // Rprintf("\tafter dpotrf\n");
                 // replace C with its inverse C^{-1}
-                F77_NAME(dpotri)(&lower, &nnIndxLU[n+i], &C[CIndx[i]], &nnIndxLU[n+i], &info FCONE); if(info != 0){error("c++ error: updateBF dpotri failed\n");}
+                F77_NAME(dpotri)(&lower, &nnIndxLU[n+i], &C[CIndx[i]], &nnIndxLU[n+i], &info FCONE);
+                if(info != 0){
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+                    {
+                        if(err_flag == 0){ err_flag = 2; }
+                    }
+                    continue;
+                }
                 // for(k=0; k < nnIndxLU[n+i]; k++){
                 //   if(C[CIndx[i] + k*(nnIndxLU[n+i]+1)] != C[CIndx[i] + k*(nnIndxLU[n+i]+1)]){Rprintf("C NAN\n");}
                 //   if(C[CIndx[i] + k*(nnIndxLU[n+i]+1)] == 0){Rprintf("C is 0: i=%i, k=%i, nnIndxLU[n+i]=%i, CIndx[i]=%i\n", i, k, nnIndxLU[n+i], CIndx[i]);}
@@ -158,33 +201,20 @@ extern "C" {
                 //     if(C[CIndx[i] + k*nnIndxLU[n+i] + l] == 0){Rprintf("C is 0: i=%i, k=%i, l=%i, nnIndxLU[n+i]=%i\n", i, k, l, nnIndxLU[n+i]);}
                 //   }
                 // }
-                for(k=0; k < nnIndxLU[n+i]*nnIndxLU[n+i]; k++){
-                  if(C[CIndx[i] + k] != C[CIndx[i] + k]){Rprintf("C is NAN\n");}
-                  // if(C[CIndx[i] + k] == 0){Rprintf("C is 0: i=%i, k=%i, nnIndxLU[n+i]=%i, CIndx[i]=%i\n", i, k, nnIndxLU[n+i], CIndx[i]);}
-                }
                 
                 // B = C^{-1}c as in pseudocode 2 of Finley et al 2019 (B here = A there)
                 F77_NAME(dsymv)(&lower, &nnIndxLU[n+i], &one, &C[CIndx[i]], &nnIndxLU[n+i], &c[nnIndxLU[i]], &inc, &zero, &B[nnIndxLU[i]], &inc FCONE);
-                for(k=0; k < nnIndxLU[n+i]; k++){
-                  if(B[nnIndxLU[i] + k] != B[nnIndxLU[i] + k]){Rprintf("B[nnIndxLU[%i] + %i] is NAN\n", i, k);}
-                  // if(C[CIndx[i] + k] == 0){Rprintf("C is 0: i=%i, k=%i, nnIndxLU[n+i]=%i, CIndx[i]=%i\n", i, k, nnIndxLU[n+i], CIndx[i]);}
-                }
                 
                 // F = C_ii - c^T B as in pseudocode 2 of Finley et al 2019 (F here = D there)
                 // (C_ii = 1 + theta[0]*fix_nugget)
                 F[i] = fabs(1 - F77_NAME(ddot)(&nnIndxLU[n+i], &B[nnIndxLU[i]], &inc, &c[nnIndxLU[i]], &inc) + theta[0]*fix_nugget);
-                if(log(F[i]) != log(F[i])){
-                  Rprintf("i = %i, F[i] = %e, log(F[i]) = %f, theta[0] = %f, fix_nugget = %f\n", i, F[i], log(F[i]), theta[0], fix_nugget);
-                  for(k=0; k < nnIndxLU[n+i]; k++){
-                    Rprintf("B[nnIndxLU[%i] + %i] = %f, c[nnIndxLU[%i] + %i] = %f\n", i, k, B[nnIndxLU[i] + k], i, k, c[nnIndxLU[i] + k]);
-                    // if(C[CIndx[i] + k] == 0){Rprintf("C is 0: i=%i, k=%i, nnIndxLU[n+i]=%i, CIndx[i]=%i\n", i, k, nnIndxLU[n+i], CIndx[i]);}
-                  }
-                }
             }else{ // compute B[0] and F[0]
                 B[i] = 0;
                 F[i] = 1+ theta[0]*fix_nugget;
             }
         }
+        if(err_flag == 1){brisc_error("c++ error: updateBF dpotrf failed\n");}
+        if(err_flag == 2){brisc_error("c++ error: updateBF dpotri failed\n");}
         for(i = 0; i < n; i++){
             logDet += log(F[i]);
             // if(log(F[i]) != log(F[i])){
@@ -262,8 +292,8 @@ extern "C" {
             }
         }
 
-        F77_NAME(dpotrf)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){error("c++ error: processed_output dpotrf failed\n");}
-        F77_NAME(dpotri)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){error("c++ error: processed_output dpotri failed\n");}
+        F77_NAME(dpotrf)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){brisc_error("c++ error: processed_output dpotrf failed\n");}
+        F77_NAME(dpotri)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){brisc_error("c++ error: processed_output dpotri failed\n");}
 
         //create Beta
         F77_NAME(dsymv)(lower, &p, &one, tmp_pp, &p, tmp_p, &inc, &zero, beta, &inc FCONE);
@@ -354,10 +384,10 @@ extern "C" {
         // Rprintf("\ttmp_p = %f, tmp_pp = %f\n", tmp_p, tmp_pp);
         
         // replace tmp_pp (X^T \Sigma X) with its Cholesky factor
-        F77_NAME(dpotrf)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){error("c++ error: likelihood dpotrf failed\n");}
+        F77_NAME(dpotrf)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){brisc_error("c++ error: likelihood dpotrf failed\n");}
         
         // replace tmp_pp with the inverse (X^T \Sigma X)^{-1}
-        F77_NAME(dpotri)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){error("c++ error: likelihood dpotri failed\n");}
+        F77_NAME(dpotri)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){brisc_error("c++ error: likelihood dpotri failed\n");}
         
         // compute beta = (X^T \Sigma X)^{-1} (X^T \Sigma Y)
         F77_NAME(dsymv)(lower, &p, &one, tmp_pp, &p, tmp_p, &inc, &zero, beta, &inc FCONE);
@@ -495,8 +525,8 @@ extern "C" {
             }
         }
 
-        F77_NAME(dpotrf)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){error("c++ error: processed_bootstrap_output dpotrf failed\n");}
-        F77_NAME(dpotri)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){error("c++ error: processed_bootstrap_output dpotri failed\n");}
+        F77_NAME(dpotrf)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){brisc_error("c++ error: processed_bootstrap_output dpotrf failed\n");}
+        F77_NAME(dpotri)(lower, &p, tmp_pp, &p, &info FCONE); if(info != 0){brisc_error("c++ error: processed_bootstrap_output dpotri failed\n");}
 
         //create Beta
         F77_NAME(dsymv)(lower, &p, &one, tmp_pp, &p, tmp_p, &inc, &zero, beta_boot, &inc FCONE);
@@ -597,9 +627,12 @@ extern "C" {
         m_nngp = INTEGER(m_r)[0];
         eps_nngp = REAL(eps_r)[0];
         fix_nugget_nngp = REAL(fix_nugget_r)[0];
+        if(nThreads_nngp < 1){
+          nThreads_nngp = 1;
+        }
         
 #ifdef _OPENMP
-        omp_set_num_threads(nThreads_nngp);
+        set_omp_threads_saved(nThreads_nngp);
 #else
         if(nThreads_nngp > 1){
           warning("n.omp.threads > %i, but source not compiled with OpenMP support.", nThreads_nngp);
@@ -677,6 +710,7 @@ extern "C" {
         SET_VECTOR_ELT(resultName_r, 1, mkChar("Beta"));
 
         namesgets(result_r, resultName_r);
+        restore_omp_threads();
         //unprotect
         UNPROTECT(nProtect);
 
@@ -706,12 +740,15 @@ extern "C" {
         std::string corName = getCorName(covModel_nngp);
 
         nThreads_nngp = INTEGER(nThreads_r)[0];
+        if(nThreads_nngp < 1){
+            nThreads_nngp = 1;
+        }
         int verbose = INTEGER(verbose_r)[0];
 
 
 
 #ifdef _OPENMP
-        omp_set_num_threads(nThreads_nngp);
+        set_omp_threads_saved(nThreads_nngp);
 #else
         if(nThreads_nngp > 1){
             warning("n.omp.threads > %i, but source not compiled with OpenMP support.", nThreads_nngp);
@@ -925,6 +962,7 @@ extern "C" {
 
 
         namesgets(result_r, resultName_r);
+        restore_omp_threads();
 
         //unprotect
         UNPROTECT(nProtect);
@@ -950,6 +988,9 @@ extern "C" {
         std::string corName = getCorName(covModel);
 
         int nThreads = INTEGER(nThreads_r)[0];
+        if(nThreads < 1){
+            nThreads = 1;
+        }
         int sim_number = INTEGER(sim_number_r)[0];
         double *sim = REAL(sim_r);
         int tot_length = n*sim_number;
@@ -958,7 +999,7 @@ extern "C" {
 
 
 #ifdef _OPENMP
-        omp_set_num_threads(nThreads);
+        set_omp_threads_saved(nThreads);
 #else
         if(nThreads > 1){
             warning("n.omp.threads > %i, but source not compiled with OpenMP support.", nThreads);
@@ -1088,6 +1129,7 @@ extern "C" {
         SET_VECTOR_ELT(resultName_r, 1, mkChar("sim"));
 
         namesgets(result_r, resultName_r);
+        restore_omp_threads();
 
         //unprotect
         UNPROTECT(nProtect);
@@ -1117,6 +1159,9 @@ extern "C" {
         std::string corName = getCorName(covModel);
 
         int nThreads = INTEGER(nThreads_r)[0];
+        if(nThreads < 1){
+            nThreads = 1;
+        }
         int sim_number = INTEGER(sim_number_r)[0];
         double *sim = REAL(sim_r);
         int tot_length = n*sim_number;
@@ -1125,7 +1170,7 @@ extern "C" {
 
 
 #ifdef _OPENMP
-        omp_set_num_threads(nThreads);
+        set_omp_threads_saved(nThreads);
 #else
         if(nThreads > 1){
             warning("n.omp.threads > %i, but source not compiled with OpenMP support.", nThreads);
@@ -1252,6 +1297,7 @@ extern "C" {
         SET_VECTOR_ELT(resultName_r, 1, mkChar("residual_sim"));
 
         namesgets(result_r, resultName_r);
+        restore_omp_threads();
 
         //unprotect
         UNPROTECT(nProtect);
@@ -1274,12 +1320,15 @@ extern "C" {
         std::string corName = getCorName(covModel_nngp);
 
         nThreads_nngp = INTEGER(nThreads_r)[0];
+        if(nThreads_nngp < 1){
+            nThreads_nngp = 1;
+        }
         int verbose = INTEGER(verbose_r)[0];
 
 
 
 #ifdef _OPENMP
-        omp_set_num_threads(nThreads_nngp);
+        set_omp_threads_saved(nThreads_nngp);
 #else
         if(nThreads_nngp > 1){
             warning("n.omp.threads > %i, but source not compiled with OpenMP support.", nThreads_nngp);
@@ -1388,6 +1437,7 @@ extern "C" {
 
 
         namesgets(result_r, resultName_r);
+        restore_omp_threads();
 
         //unprotect
         UNPROTECT(nProtect);
@@ -1418,6 +1468,9 @@ extern "C" {
         // Rprintf("\tcovModel_nngp %i\n", covModel_nngp);
 
         nThreads_nngp = INTEGER(nThreads_r)[0];
+        if(nThreads_nngp < 1){
+            nThreads_nngp = 1;
+        }
         int verbose = INTEGER(verbose_r)[0];
         
         // Rprintf("X_nngp:\n");
@@ -1432,7 +1485,7 @@ extern "C" {
 
 
 #ifdef _OPENMP
-        omp_set_num_threads(nThreads_nngp);
+        set_omp_threads_saved(nThreads_nngp);
 #else
         if(nThreads_nngp > 1){
             warning("n.omp.threads > %i, but source not compiled with OpenMP support.", nThreads_nngp);
@@ -1615,6 +1668,7 @@ extern "C" {
 
 
         namesgets(result_r, resultName_r);
+        restore_omp_threads();
 
         //unprotect
         UNPROTECT(nProtect);
@@ -1648,11 +1702,14 @@ extern "C" {
       std::string corName = getCorName(covModel_nngp);
 
       nThreads_nngp = INTEGER(nThreads_r)[0];
+      if(nThreads_nngp < 1){
+        nThreads_nngp = 1;
+      }
       int verbose = INTEGER(verbose_r)[0];
 
 
 #ifdef _OPENMP
-      omp_set_num_threads(nThreads_nngp);
+      set_omp_threads_saved(nThreads_nngp);
 #else
       if(nThreads_nngp > 1){
         warning("n.omp.threads > %i, but source not compiled with OpenMP support.", nThreads_nngp);
@@ -1812,6 +1869,7 @@ extern "C" {
 
 
       namesgets(result_r, resultName_r);
+      restore_omp_threads();
 
       //unprotect
       UNPROTECT(nProtect);
